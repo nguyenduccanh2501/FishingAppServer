@@ -1,10 +1,22 @@
 package com.example.fishingappserver;
 
+import android.Manifest;
+import android.app.Activity;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Bundle;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
+import android.support.v4.app.ActivityCompat;
+import android.support.v7.app.AlertDialog;
 import android.support.v7.widget.GridLayoutManager;
 import android.support.v7.widget.RecyclerView;
+import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.support.design.widget.NavigationView;
 import android.support.v4.view.GravityCompat;
@@ -14,23 +26,64 @@ import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.Toast;
 
 import com.example.fishingappserver.Adapter.MenuAdapter;
 import com.example.fishingappserver.Model.Category;
 import com.example.fishingappserver.Retrofit.IFishingAPI;
 import com.example.fishingappserver.Utils.Common;
+import com.example.fishingappserver.Utils.ProgressRequestBody;
+import com.example.fishingappserver.Utils.UploadCallback;
 
+import java.io.File;
 import java.util.List;
+import java.util.UUID;
 
+import io.reactivex.Scheduler;
 import io.reactivex.android.schedulers.AndroidSchedulers;
 import io.reactivex.disposables.CompositeDisposable;
 import io.reactivex.functions.Consumer;
+import io.reactivex.schedulers.Schedulers;
+import okhttp3.MultipartBody;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity
-        implements NavigationView.OnNavigationItemSelectedListener {
+        implements NavigationView.OnNavigationItemSelectedListener, UploadCallback {
+    private static final int REQUEST_PERMISSION_CODE = 1111;
+    private static final int PICK_FILE_REQUEST = 2222;
     RecyclerView listCategory;
     IFishingAPI mService;
     CompositeDisposable compositeDisposable = new CompositeDisposable();
+
+    EditText edt_name;
+    ImageView img_browser;
+    Uri selectedUri=null;
+    String upload_img_path="";
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        switch(requestCode){
+            case REQUEST_PERMISSION_CODE:
+            {
+                if (grantResults.length>0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)
+                    Toast.makeText(this, "Permission granted", Toast.LENGTH_SHORT).show();
+                else
+                    Toast.makeText(this, "Permission denied", Toast.LENGTH_SHORT).show();
+
+            }
+                break;
+                default:
+                    break;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -38,12 +91,16 @@ public class MainActivity extends AppCompatActivity
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)!= PackageManager.PERMISSION_GRANTED)
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+            }, REQUEST_PERMISSION_CODE);
+
         FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.btn_add_category);
         fab.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                Snackbar.make(view, "Replace with your own action", Snackbar.LENGTH_LONG)
-                        .setAction("Action", null).show();
+                showAddCategoryDialog();
             }
         });
 
@@ -63,6 +120,116 @@ public class MainActivity extends AppCompatActivity
         mService= Common.getAPI();
         getMenu();
         }
+
+    private void showAddCategoryDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Thêm sản phẩm mới");
+        View view = LayoutInflater.from(this).inflate(R.layout.add_category_item,null);
+
+        edt_name = view.findViewById(R.id.edt_add_category);
+        img_browser = view.findViewById(R.id.img_browser);
+
+        //event
+        img_browser.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivityForResult(Intent.createChooser(FileUtils.createGetContentIntent(), "Select a image"),
+                        PICK_FILE_REQUEST);
+            }
+        });
+
+        //set view
+        builder.setView(view);
+        builder.setNegativeButton("Hủy", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                dialog.dismiss();
+                upload_img_path="";
+                selectedUri=null;
+
+            }
+        }).setPositiveButton("Thêm", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                if (edt_name.getText().toString().isEmpty()){
+                    Toast.makeText(MainActivity.this, "Tên không được bỏ trống", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                if (upload_img_path.isEmpty()){
+                    Toast.makeText(MainActivity.this, "Xin hãy chọn ảnh", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                compositeDisposable.add(mService.addNewCategory(edt_name.getText().toString(), upload_img_path)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribeOn(Schedulers.io())
+                .subscribe(new Consumer<String>() {
+                    @Override
+                    public void accept(String s) throws Exception {
+                        Toast.makeText(MainActivity.this, s, Toast.LENGTH_SHORT).show();
+                        getMenu();
+                        upload_img_path="";
+                        selectedUri=null;
+                    }
+                }));
+            }
+        }).show();
+
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode== Activity.RESULT_OK){
+            if (requestCode == PICK_FILE_REQUEST){
+                if (data!=null){
+                    selectedUri = data.getData();
+                    if (selectedUri!=null && !selectedUri.getPath().isEmpty())
+                    {
+                        img_browser.setImageURI(selectedUri);
+                        uploadFileToServer();
+                    }
+                    else
+                        Toast.makeText(this, "Cannot upload to server", Toast.LENGTH_SHORT).show();
+                }
+            }
+        }
+    }
+
+    private void uploadFileToServer() {
+        if (selectedUri!=null){
+            File file = FileUtils.getFile(this, selectedUri);
+            String fileName = new StringBuilder(UUID.randomUUID().toString())
+                    .append(FileUtils.getExtension(file.toString())).toString();
+            ProgressRequestBody request = new ProgressRequestBody(file, this);
+
+            final MultipartBody.Part body = MultipartBody.Part.createFormData("upload_file",fileName,request);
+
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    mService.uploadCategoryFile(body)
+                            .enqueue(new Callback<String>() {
+                                @Override
+                                public void onResponse(Call<String> call, Response<String> response) {
+                                    //after upload, we will get file name and return string contains link of image
+                                    upload_img_path=new StringBuilder(Common.BASE_URL)
+                                            .append("server/category/category_img")
+                                            .append(response.body().toString())
+                                            .toString();
+                                   Log.d("ImgPath", upload_img_path);
+                                }
+
+                                @Override
+                                public void onFailure(Call<String> call, Throwable t) {
+                                    Toast.makeText(MainActivity.this, t.getMessage(), Toast.LENGTH_SHORT).show();
+                                }
+                            });
+                }
+            }).start();
+        }
+    }
 
     private void getMenu() {
         compositeDisposable.add(mService.getMenu()
@@ -153,5 +320,10 @@ public class MainActivity extends AppCompatActivity
         DrawerLayout drawer = (DrawerLayout) findViewById(R.id.drawer_layout);
         drawer.closeDrawer(GravityCompat.START);
         return true;
+    }
+
+    @Override
+    public void onProgressUpdate(int pertantage) {
+
     }
 }
